@@ -1,0 +1,10 @@
+services:
+  uptime-kuma:
+    build:
+      context: .
+      dockerfile: docker/dockerfile
+      target: release
+    image: uptime-kuma-local:2
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
