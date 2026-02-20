@@ -312,7 +312,7 @@ class UptimeCalculator {
                 dailyStatBean.extras = JSON.stringify(extras);
             }
         }
-        await R.store(dailyStatBean);
+        await this.storeStatBean("stat_daily", dailyStatBean);
 
         let currentDate = this.getCurrentDate();
 
@@ -332,7 +332,7 @@ class UptimeCalculator {
                     hourlyStatBean.extras = JSON.stringify(extras);
                 }
             }
-            await R.store(hourlyStatBean);
+            await this.storeStatBean("stat_hourly", hourlyStatBean);
         }
 
         // For migration mode, we don't need to store old hourly and minutely data, but we need 24-hour's minutely data
@@ -351,7 +351,7 @@ class UptimeCalculator {
                     minutelyStatBean.extras = JSON.stringify(extras);
                 }
             }
-            await R.store(minutelyStatBean);
+            await this.storeStatBean("stat_minutely", minutelyStatBean);
         }
 
         // No need to remove old data in migration mode
@@ -379,7 +379,7 @@ class UptimeCalculator {
      * @returns {Promise<import("redbean-node").Bean>} stat_daily bean
      */
     async getDailyStatBean(timestamp) {
-        if (this.lastDailyStatBean && this.lastDailyStatBean.timestamp === timestamp) {
+        if (this.lastDailyStatBean && this.lastDailyStatBean.timestamp === timestamp && this.lastDailyStatBean.id) {
             return this.lastDailyStatBean;
         }
 
@@ -401,7 +401,7 @@ class UptimeCalculator {
      * @returns {Promise<import("redbean-node").Bean>} stat_hourly bean
      */
     async getHourlyStatBean(timestamp) {
-        if (this.lastHourlyStatBean && this.lastHourlyStatBean.timestamp === timestamp) {
+        if (this.lastHourlyStatBean && this.lastHourlyStatBean.timestamp === timestamp && this.lastHourlyStatBean.id) {
             return this.lastHourlyStatBean;
         }
 
@@ -423,7 +423,11 @@ class UptimeCalculator {
      * @returns {Promise<import("redbean-node").Bean>} stat_minutely bean
      */
     async getMinutelyStatBean(timestamp) {
-        if (this.lastMinutelyStatBean && this.lastMinutelyStatBean.timestamp === timestamp) {
+        if (
+            this.lastMinutelyStatBean &&
+            this.lastMinutelyStatBean.timestamp === timestamp &&
+            this.lastMinutelyStatBean.id
+        ) {
             return this.lastMinutelyStatBean;
         }
 
@@ -830,6 +834,74 @@ class UptimeCalculator {
      */
     getCurrentDate() {
         return dayjs.utc();
+    }
+
+    /**
+     * Detect duplicate key errors across supported database drivers.
+     * @param {Error & { code?: string, errno?: number, number?: number, message?: string }} error DB error
+     * @returns {boolean} True if error is duplicate-key related
+     */
+    isDuplicateKeyError(error) {
+        const duplicateCodes = new Set([
+            "ER_DUP_ENTRY", // MySQL / MariaDB
+            "SQLITE_CONSTRAINT",
+            "SQLITE_CONSTRAINT_UNIQUE",
+            "23505", // PostgreSQL
+        ]);
+
+        if (error && typeof error.code === "string" && duplicateCodes.has(error.code)) {
+            return true;
+        }
+
+        if (error && (error.number === 2627 || error.number === 2601)) {
+            return true;
+        }
+
+        return typeof error?.message === "string" && /duplicate|unique constraint/i.test(error.message);
+    }
+
+    /**
+     * Store a stat bean and recover on duplicate-key race conditions.
+     * @param {"stat_daily"|"stat_hourly"|"stat_minutely"} tableName Table name
+     * @param {import("redbean-node").Bean} bean Stat bean
+     * @returns {Promise<void>}
+     */
+    async storeStatBean(tableName, bean) {
+        try {
+            await R.store(bean);
+            return;
+        } catch (error) {
+            if (!this.isDuplicateKeyError(error)) {
+                throw error;
+            }
+        }
+
+        const existing = await R.findOne(tableName, " monitor_id = ? AND timestamp = ?", [this.monitorID, bean.timestamp]);
+        if (!existing) {
+            throw new Error(
+                `Duplicate-key detected for ${tableName} but existing row was not found (monitor_id=${this.monitorID}, timestamp=${bean.timestamp})`
+            );
+        }
+
+        existing.up = bean.up;
+        existing.down = bean.down;
+        existing.ping = bean.ping;
+        existing.pingMin = bean.pingMin;
+        existing.pingMax = bean.pingMax;
+
+        if (bean.extras !== undefined) {
+            existing.extras = bean.extras;
+        }
+
+        await R.store(existing);
+
+        if (tableName === "stat_daily") {
+            this.lastDailyStatBean = existing;
+        } else if (tableName === "stat_hourly") {
+            this.lastHourlyStatBean = existing;
+        } else {
+            this.lastMinutelyStatBean = existing;
+        }
     }
 
     /**

@@ -11,10 +11,16 @@ const { RemoteBrowser } = require("../remote-browser");
 const { commandExists } = require("../util-server");
 
 /**
- * Cached instance of a browser
+ * Cached instance of the local browser
  * @type {import ("playwright-core").Browser}
  */
-let browser = null;
+let localBrowser = null;
+
+/**
+ * Cached instances of remote browser connections by remote browser ID
+ * @type {Map<number, { url: string, browser: import ("playwright-core").Browser }>}
+ */
+const remoteBrowserConnections = new Map();
 
 let allowedList = [];
 let lastAutoDetectChromeExecutable = null;
@@ -76,19 +82,19 @@ async function isAllowedChromeExecutable(executablePath) {
  * @returns {Promise<import ("playwright-core").Browser>} The browser
  */
 async function getBrowser() {
-    if (browser && browser.isConnected()) {
-        return browser;
+    if (localBrowser && localBrowser.isConnected()) {
+        return localBrowser;
     } else {
         let executablePath = await Settings.get("chromeExecutable");
 
         executablePath = await prepareChromeExecutable(executablePath);
 
-        browser = await chromium.launch({
+        localBrowser = await chromium.launch({
             //headless: false,
             executablePath,
         });
 
-        return browser;
+        return localBrowser;
     }
 }
 
@@ -100,9 +106,40 @@ async function getBrowser() {
  */
 async function getRemoteBrowser(remoteBrowserID, userId) {
     let remoteBrowser = await RemoteBrowser.get(remoteBrowserID, userId);
+    if (!remoteBrowser) {
+        throw new Error(`Remote browser #${remoteBrowserID} not found`);
+    }
+
+    const cacheKey = remoteBrowser.id;
+    const cachedConnection = remoteBrowserConnections.get(cacheKey);
+
+    if (cachedConnection && cachedConnection.browser.isConnected() && cachedConnection.url === remoteBrowser.url) {
+        return cachedConnection.browser;
+    }
+
+    if (cachedConnection) {
+        try {
+            await cachedConnection.browser.close();
+        } catch (_) {}
+        remoteBrowserConnections.delete(cacheKey);
+    }
+
     log.debug("chromium", `Using remote browser: ${remoteBrowser.name} (${remoteBrowser.id})`);
-    browser = await chromium.connect(remoteBrowser.url);
-    return browser;
+    const remoteConnection = await chromium.connect(remoteBrowser.url);
+
+    remoteConnection.on("disconnected", () => {
+        const current = remoteBrowserConnections.get(cacheKey);
+        if (current && current.browser === remoteConnection) {
+            remoteBrowserConnections.delete(cacheKey);
+        }
+    });
+
+    remoteBrowserConnections.set(cacheKey, {
+        url: remoteBrowser.url,
+        browser: remoteConnection,
+    });
+
+    return remoteConnection;
 }
 
 /**
@@ -201,9 +238,9 @@ async function findChrome(executables) {
  * @returns {Promise<void>}
  */
 async function resetChrome() {
-    if (browser) {
-        await browser.close();
-        browser = null;
+    if (localBrowser) {
+        await localBrowser.close();
+        localBrowser = null;
     }
 }
 
