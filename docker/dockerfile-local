@@ -1,0 +1,41 @@
+############################################
+# Build in Golang
+############################################
+FROM louislam/uptime-kuma:builder-go AS build_healthcheck
+
+############################################
+# Build app (including frontend dist) in Node.js
+############################################
+FROM louislam/uptime-kuma:base2 AS build
+USER node
+WORKDIR /app
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
+
+COPY --chown=node:node .npmrc .npmrc
+COPY --chown=node:node package.json package.json
+COPY --chown=node:node package-lock.json package-lock.json
+
+# Install full deps for frontend build
+RUN npm ci
+
+COPY --chown=node:node . .
+COPY --chown=node:node --from=build_healthcheck /app/extra/healthcheck /app/extra/healthcheck
+
+# Build frontend assets, then keep only runtime deps
+RUN npm run build && npm prune --omit=dev && mkdir ./data
+
+############################################
+# Main runtime image
+############################################
+FROM louislam/uptime-kuma:base2 AS release
+WORKDIR /app
+
+ENV UPTIME_KUMA_IS_CONTAINER=1
+
+COPY --chown=node:node --from=build /app /app
+
+EXPOSE 3001
+HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 CMD extra/healthcheck
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "server/server.js"]
