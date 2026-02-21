@@ -75,6 +75,11 @@
                 <span v-if="monitor.type === 'gamedig'">
                     Gamedig - {{ monitor.game }}: {{ monitor.hostname }}:{{ monitor.port }}
                 </span>
+                <span v-if="monitor.type === 'minecraft'">
+                    Minecraft ({{ monitor.subtype === "bedrock" ? "Bedrock" : "Java" }}): {{ monitor.hostname }}:{{
+                        monitor.port
+                    }}
+                </span>
                 <span v-if="monitor.type === 'grpc-keyword'">
                     gRPC - {{ filterPassword(monitor.grpcUrl) }}
                     <br />
@@ -115,6 +120,10 @@
                     >
                         <font-awesome-icon icon="play" />
                         {{ $t("Resume") }}
+                    </button>
+                    <button v-if="monitor.active && monitor.type !== 'group' && monitor.type !== 'push'" class="btn btn-normal" @click="checkNow">
+                        <font-awesome-icon icon="heartbeat" />
+                        {{ $t("Check Now") }}
                     </button>
                     <router-link :to="'/edit/' + monitor.id" class="btn btn-normal">
                         <font-awesome-icon icon="edit" />
@@ -660,6 +669,16 @@ export default {
          */
         pauseMonitor() {
             this.$root.getSocket().emit("pauseMonitor", this.monitor.id, (res) => {
+                this.$root.toastRes(res);
+            });
+        },
+
+        /**
+         * Run a monitor check immediately
+         * @returns {void}
+         */
+        checkNow() {
+            this.$root.getSocket().emit("checkNow", this.monitor.id, (res) => {
                 this.$root.toastRes(res);
             });
         },

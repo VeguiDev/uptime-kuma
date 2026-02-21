@@ -1096,6 +1096,35 @@ let needSetup = false;
             }
         });
 
+        socket.on("checkNow", async (monitorID, callback) => {
+            try {
+                checkLogin(socket);
+                await checkOwner(socket.userID, monitorID);
+
+                const monitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [monitorID, socket.userID]);
+                if (!monitor) {
+                    throw new Error("Monitor not found.");
+                }
+
+                if (!monitor.active) {
+                    throw new Error("Monitor is paused. Resume it before running Check Now.");
+                }
+
+                await restartMonitor(socket.userID, monitorID);
+                await server.sendUpdateMonitorIntoList(socket, monitorID);
+
+                callback({
+                    ok: true,
+                    msg: "Check requested.",
+                });
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
         socket.on("deleteMonitor", async (monitorID, deleteChildren, callback) => {
             try {
                 // Backward compatibility: if deleteChildren is omitted, the second parameter is the callback

@@ -81,6 +81,7 @@
                                             {{ $t("Steam Game Server") }}
                                         </option>
                                         <option value="gamedig">GameDig</option>
+                                        <option value="minecraft">Minecraft</option>
                                         <option value="mqtt">MQTT</option>
                                         <option value="rabbitmq">RabbitMQ</option>
                                         <option value="kafka-producer">Kafka Producer</option>
@@ -131,6 +132,19 @@
                                     <option value="ping">Ping</option>
                                     <option value="http">HTTP(s)</option>
                                     <option value="dns">DNS</option>
+                                </select>
+                            </div>
+
+                            <div v-if="monitor.type === 'minecraft'" class="my-3">
+                                <label for="subtype" class="form-label">{{ $t("Monitor Subtype") }}</label>
+                                <select
+                                    id="subtype"
+                                    v-model="monitor.subtype"
+                                    class="form-select"
+                                    data-testid="monitor-subtype-select"
+                                >
+                                    <option value="java">Java</option>
+                                    <option value="bedrock">Bedrock</option>
                                 </select>
                             </div>
 
@@ -456,7 +470,8 @@
                                     monitor.type === 'tailscale-ping' ||
                                     monitor.type === 'smtp' ||
                                     monitor.type === 'snmp' ||
-                                    monitor.type === 'sip-options'
+                                    monitor.type === 'sip-options' ||
+                                    monitor.type === 'minecraft'
                                 "
                                 class="my-3"
                             >
@@ -664,6 +679,7 @@
                                     monitor.type === 'radius' ||
                                     monitor.type === 'smtp' ||
                                     monitor.type === 'snmp' ||
+                                    monitor.type === 'minecraft' ||
                                     monitor.type === 'sip-options' ||
                                     (monitor.type === 'globalping' &&
                                         monitor.subtype === 'ping' &&
@@ -3293,6 +3309,9 @@ message HealthCheckResponse {
             if (newType === "globalping" && !this.monitor.subtype) {
                 this.monitor.subtype = "ping";
             }
+            if (newType === "minecraft" && !this.monitor.subtype) {
+                this.monitor.subtype = "java";
+            }
 
             if (newType === "dns" && !this.monitor.dns_resolve_server) {
                 this.monitor.dns_resolve_server = "1.1.1.1";
@@ -3311,7 +3330,10 @@ message HealthCheckResponse {
             }
 
             // Set default port for DNS if not already defined
-            if (!this.monitor.port || this.monitor.port === "53" || this.monitor.port === "1812") {
+            if (
+                !this.monitor.port ||
+                ["53", "1812", "161", "80", "25565", "19132"].includes(this.monitor.port)
+            ) {
                 if (this.monitor.type === "dns") {
                     this.monitor.port = "53";
                 } else if (this.monitor.type === "radius") {
@@ -3320,6 +3342,10 @@ message HealthCheckResponse {
                     this.monitor.port = "161";
                 } else if (this.monitor.type === "globalping" && this.monitor.subtype === "ping") {
                     this.monitor.port = "80";
+                } else if (this.monitor.type === "minecraft" && this.monitor.subtype === "bedrock") {
+                    this.monitor.port = "19132";
+                } else if (this.monitor.type === "minecraft") {
+                    this.monitor.port = "25565";
                 } else {
                     this.monitor.port = undefined;
                 }
@@ -3387,6 +3413,22 @@ message HealthCheckResponse {
         },
 
         "monitor.subtype"(newSubtype, oldSubtype) {
+            if (this.monitor.type === "minecraft") {
+                if (!oldSubtype && this.monitor.port === undefined) {
+                    this.monitor.port = newSubtype === "bedrock" ? "19132" : "25565";
+                }
+
+                if (newSubtype !== oldSubtype) {
+                    this.monitor.port = newSubtype === "bedrock" ? "19132" : "25565";
+                }
+
+                return;
+            }
+
+            if (this.monitor.type !== "globalping") {
+                return;
+            }
+
             if (!oldSubtype && !this.monitor.protocol) {
                 if (newSubtype === "ping") {
                     this.monitor.protocol = "ICMP";
@@ -3660,6 +3702,7 @@ message HealthCheckResponse {
                     "ping",
                     "steam",
                     "gamedig",
+                    "minecraft",
                     "radius",
                     "tailscale-ping",
                     "smtp",
