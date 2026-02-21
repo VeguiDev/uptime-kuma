@@ -6,5 +6,6 @@ services:
       target: release
     image: uptime-kuma-local:2
     restart: unless-stopped
+    shm_size: "1gb"
     volumes:
       - ./data:/app/data
