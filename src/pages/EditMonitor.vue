@@ -148,6 +148,22 @@
                                 </select>
                             </div>
 
+                            <div v-if="monitor.type === 'real-browser'" class="my-3">
+                                <label for="subtype" class="form-label">{{ $t("Monitor Subtype") }}</label>
+                                <select
+                                    id="subtype"
+                                    v-model="monitor.subtype"
+                                    class="form-select"
+                                    data-testid="monitor-subtype-select"
+                                >
+                                    <option value="standard">{{ $t("realBrowserSubtypeStandard") }}</option>
+                                    <option value="cf">{{ $t("realBrowserSubtypeCF") }}</option>
+                                </select>
+                                <div class="form-text">
+                                    {{ $t("realBrowserSubtypeCFDescription") }}
+                                </div>
+                            </div>
+
                             <div v-if="monitor.type === 'sip-options'" class="alert alert-warning" role="alert">
                                 {{ $t("sipsakPingWarning") }}
                             </div>
@@ -3311,6 +3327,9 @@ message HealthCheckResponse {
             }
             if (newType === "minecraft" && !this.monitor.subtype) {
                 this.monitor.subtype = "java";
+            }
+            if (newType === "real-browser" && !["standard", "cf"].includes(this.monitor.subtype)) {
+                this.monitor.subtype = "standard";
             }
 
             if (newType === "dns" && !this.monitor.dns_resolve_server) {

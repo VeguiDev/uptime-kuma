@@ -133,7 +133,7 @@
                                 v-model="config.domainNameList[index]"
                                 type="text"
                                 class="no-bg domain-input"
-                                placeholder="example.com"
+                                placeholder="status.example.com or example.com/status"
                             />
                             <button
                                 class="p-0 bg-transparent border-0"
@@ -144,6 +144,9 @@
                             </button>
                         </li>
                     </ul>
+                    <div class="form-text mt-1">
+                        {{ $t("statusPageDomainRoutingHint") }}
+                    </div>
                 </div>
 
                 <!-- Analytics -->

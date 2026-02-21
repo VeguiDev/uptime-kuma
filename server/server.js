@@ -252,11 +252,10 @@ let needSetup = false;
         log.debug("entry", `Request Domain: ${hostname}`);
 
         const uptimeKumaEntryPage = server.entryPage;
-        if (hostname in StatusPage.domainMappingList) {
+        const statusPageSlug = StatusPage.getStatusPageSlugByDomain(hostname, request.path);
+        if (statusPageSlug) {
             log.debug("entry", "This is a status page domain");
-
-            let slug = StatusPage.domainMappingList[hostname];
-            await StatusPage.handleStatusPageResponse(response, server.indexHTML, slug);
+            await StatusPage.handleStatusPageResponse(response, server.indexHTML, statusPageSlug);
         } else if (uptimeKumaEntryPage && uptimeKumaEntryPage.startsWith("statusPage-")) {
             response.redirect("/status/" + uptimeKumaEntryPage.replace("statusPage-", ""));
         } else {

@@ -34,9 +34,12 @@ router.get("/api/entry-page", async (request, response) => {
         hostname = request.headers["x-forwarded-host"];
     }
 
-    if (hostname in StatusPage.domainMappingList) {
+    const pathname = typeof request.query.pathname === "string" ? request.query.pathname : "/";
+    const statusPageSlug = StatusPage.getStatusPageSlugByDomain(hostname, pathname);
+
+    if (statusPageSlug) {
         result.type = "statusPageMatchedDomain";
-        result.statusPageSlug = StatusPage.domainMappingList[hostname];
+        result.statusPageSlug = statusPageSlug;
     } else {
         result.type = "entryPage";
         result.entryPage = server.entryPage;

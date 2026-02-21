@@ -15,6 +15,7 @@ const { commandExists } = require("../util-server");
  * @type {import ("playwright-core").Browser}
  */
 let localBrowser = null;
+let localCloudflareBrowser = null;
 
 /**
  * Cached instances of remote browser connections by remote browser ID
@@ -24,6 +25,9 @@ const remoteBrowserConnections = new Map();
 
 let allowedList = [];
 let lastAutoDetectChromeExecutable = null;
+const CLOUDFLARE_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const CLOUDFLARE_ACCEPT_LANGUAGE = "en-US,en;q=0.9";
 
 if (process.platform === "win32") {
     allowedList.push(process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe");
@@ -95,6 +99,121 @@ async function getBrowser() {
         });
 
         return localBrowser;
+    }
+}
+
+/**
+ * Get a local browser instance optimized for Cloudflare-protected pages.
+ * It prefers headed mode and falls back to headless if the environment has no display.
+ * @returns {Promise<import ("playwright-core").Browser>} The browser
+ */
+async function getCloudflareBrowser() {
+    if (localCloudflareBrowser && localCloudflareBrowser.isConnected()) {
+        return localCloudflareBrowser;
+    }
+
+    let executablePath = await Settings.get("chromeExecutable");
+    executablePath = await prepareChromeExecutable(executablePath);
+
+    const launchOptions = {
+        executablePath,
+        headless: false,
+        args: [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+        ],
+    };
+
+    try {
+        localCloudflareBrowser = await chromium.launch(launchOptions);
+    } catch (error) {
+        const message = (error && error.message) || "";
+        const looksLikeDisplayIssue =
+            message.includes("Missing X server") ||
+            message.includes("ozone_platform_x11") ||
+            message.includes("headed mode") ||
+            message.includes("DISPLAY");
+
+        if (!looksLikeDisplayIssue) {
+            throw error;
+        }
+
+        log.warn(
+            "chromium",
+            "Could not start headed Chromium for Cloudflare mode, falling back to headless mode."
+        );
+
+        localCloudflareBrowser = await chromium.launch({
+            executablePath,
+            args: launchOptions.args,
+        });
+    }
+
+    return localCloudflareBrowser;
+}
+
+/**
+ * Checks if a page looks like a Cloudflare challenge page.
+ * @param {import("playwright-core").Page} page Browser page
+ * @returns {Promise<boolean>} True if challenge markers are detected
+ */
+async function isCloudflareChallengePage(page) {
+    const markers = [
+        "checking your browser before accessing",
+        "performing security verification",
+        "just a moment",
+        "verify you are human",
+        "attention required!",
+    ];
+
+    const content = await page.evaluate(() => {
+        const title = (document?.title || "").toLowerCase();
+        const body = (document?.body?.innerText || "").toLowerCase();
+        return `${title}\n${body}`;
+    });
+
+    return markers.some((marker) => content.includes(marker));
+}
+
+/**
+ * Wait for a Cloudflare challenge to clear if detected.
+ * @param {import("playwright-core").Page} page Browser page
+ * @param {number} timeout Check timeout in milliseconds
+ * @param {string} monitorName Monitor display name
+ * @returns {Promise<void>}
+ */
+async function waitForCloudflareChallengeIfNeeded(page, timeout, monitorName) {
+    const hasChallenge = await isCloudflareChallengePage(page);
+    if (!hasChallenge) {
+        return;
+    }
+
+    const waitTimeout = Math.max(3000, Math.min(20000, Math.floor(timeout * 0.7)));
+
+    log.info(
+        "monitor",
+        `[${monitorName}] Cloudflare challenge detected, waiting up to ${waitTimeout}ms for completion`
+    );
+
+    try {
+        await page.waitForFunction(
+            () => {
+                const text = `${(document?.title || "").toLowerCase()}\n${(document?.body?.innerText || "").toLowerCase()}`;
+                const challengeMarkers = [
+                    "checking your browser before accessing",
+                    "performing security verification",
+                    "just a moment",
+                    "verify you are human",
+                    "attention required!",
+                ];
+                return !challengeMarkers.some((marker) => text.includes(marker));
+            },
+            {
+                timeout: waitTimeout,
+            }
+        );
+    } catch (_) {
+        throw new Error("Cloudflare challenge was not solved within the timeout.");
     }
 }
 
@@ -285,6 +404,11 @@ async function resetChrome() {
         await localBrowser.close();
         localBrowser = null;
     }
+
+    if (localCloudflareBrowser) {
+        await localCloudflareBrowser.close();
+        localCloudflareBrowser = null;
+    }
 }
 
 /**
@@ -330,13 +454,40 @@ class RealBrowserMonitorType extends MonitorType {
      * @inheritdoc
      */
     async check(monitor, heartbeat, server) {
+        const isCloudflareMode = monitor.subtype === "cf";
+
         const runCheck = async (browser) => {
-            const context = await browser.newContext({
+            const contextOptions = {
                 ignoreHTTPSErrors: monitor.getIgnoreTls(),
-            });
+            };
+
+            if (isCloudflareMode) {
+                contextOptions.userAgent = CLOUDFLARE_USER_AGENT;
+                contextOptions.locale = "en-US";
+                contextOptions.viewport = {
+                    width: 1366,
+                    height: 768,
+                };
+            }
+
+            const context = await browser.newContext(contextOptions);
 
             try {
+                if (isCloudflareMode) {
+                    await context.addInitScript(() => {
+                        Object.defineProperty(navigator, "webdriver", {
+                            get: () => undefined,
+                        });
+                    });
+                }
+
                 const page = await context.newPage();
+
+                if (isCloudflareMode) {
+                    await page.setExtraHTTPHeaders({
+                        "Accept-Language": CLOUDFLARE_ACCEPT_LANGUAGE,
+                    });
+                }
 
                 // Prevent Local File Inclusion
                 // Accept only http:// and https://
@@ -349,27 +500,47 @@ class RealBrowserMonitorType extends MonitorType {
                 const timeout = Math.max(1000, Math.floor(monitor.interval * 1000 * 0.8));
                 let res;
 
-                try {
-                    res = await page.goto(monitor.url, {
-                        waitUntil: "networkidle",
-                        timeout,
-                    });
-                } catch (error) {
-                    if (!isNavigationTimeoutError(error)) {
-                        throw error;
-                    }
-
-                    // Some sites keep long-lived network connections and never reach "networkidle".
-                    // Retry once with a less strict load condition.
-                    const fallbackTimeout = Math.max(1000, Math.floor(timeout * 0.6));
-                    log.warn(
-                        "monitor",
-                        `[${monitor.name}] page.goto timeout with waitUntil=networkidle, retrying with waitUntil=domcontentloaded`
-                    );
+                if (isCloudflareMode) {
                     res = await page.goto(monitor.url, {
                         waitUntil: "domcontentloaded",
-                        timeout: fallbackTimeout,
+                        timeout,
                     });
+
+                    await waitForCloudflareChallengeIfNeeded(page, timeout, monitor.name);
+
+                    // Re-check once after challenge so status reflects the final destination page.
+                    const verifyTimeout = Math.max(3000, Math.floor(timeout * 0.6));
+                    const verifyResponse = await page.goto(monitor.url, {
+                        waitUntil: "domcontentloaded",
+                        timeout: verifyTimeout,
+                    });
+
+                    if (verifyResponse) {
+                        res = verifyResponse;
+                    }
+                } else {
+                    try {
+                        res = await page.goto(monitor.url, {
+                            waitUntil: "networkidle",
+                            timeout,
+                        });
+                    } catch (error) {
+                        if (!isNavigationTimeoutError(error)) {
+                            throw error;
+                        }
+
+                        // Some sites keep long-lived network connections and never reach "networkidle".
+                        // Retry once with a less strict load condition.
+                        const fallbackTimeout = Math.max(1000, Math.floor(timeout * 0.6));
+                        log.warn(
+                            "monitor",
+                            `[${monitor.name}] page.goto timeout with waitUntil=networkidle, retrying with waitUntil=domcontentloaded`
+                        );
+                        res = await page.goto(monitor.url, {
+                            waitUntil: "domcontentloaded",
+                            timeout: fallbackTimeout,
+                        });
+                    }
                 }
 
                 if (!res) {
@@ -404,7 +575,7 @@ class RealBrowserMonitorType extends MonitorType {
         };
 
         if (!monitor.remote_browser) {
-            const browser = await getBrowser();
+            const browser = isCloudflareMode ? await getCloudflareBrowser() : await getBrowser();
             await runCheck(browser);
             return;
         }

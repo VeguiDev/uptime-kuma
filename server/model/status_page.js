@@ -29,6 +29,163 @@ class StatusPage extends BeanModel {
     static domainMappingList = {};
 
     /**
+     * Normalize hostname:
+     * - lowercases
+     * - trims spaces
+     * - keeps first value if comma-separated
+     * - strips a trailing dot and a trailing port
+     * @param {string} hostname Raw host value
+     * @returns {string} Normalized host
+     */
+    static normalizeHostname(hostname) {
+        if (typeof hostname !== "string") {
+            return "";
+        }
+
+        let normalized = hostname.split(",")[0].trim().toLowerCase();
+
+        if (normalized.startsWith("[")) {
+            const end = normalized.indexOf("]");
+            if (end > 0) {
+                return normalized.slice(0, end + 1);
+            }
+        }
+
+        normalized = normalized.replace(/\.$/, "");
+        normalized = normalized.replace(/:\d+$/, "");
+
+        return normalized;
+    }
+
+    /**
+     * Normalize a URL path:
+     * - ensures leading slash
+     * - collapses trailing slash (except root)
+     * @param {string} pathname Raw path
+     * @returns {string} Normalized path
+     */
+    static normalizePath(pathname) {
+        if (typeof pathname !== "string" || pathname.length === 0) {
+            return "/";
+        }
+
+        let normalized = pathname.startsWith("/") ? pathname : `/${pathname}`;
+        normalized = normalized.replace(/\/+/g, "/");
+
+        if (normalized.length > 1 && normalized.endsWith("/")) {
+            normalized = normalized.slice(0, -1);
+        }
+
+        return normalized;
+    }
+
+    /**
+     * Normalize a status page domain mapping entry.
+     * Supports both host-only (`status.example.com`) and host+path (`example.com/status`).
+     * @param {string} domainInput Raw user-provided domain input
+     * @returns {string|null} Normalized mapping key (host or host/path)
+     * @throws {Error} Invalid domain format
+     */
+    static normalizeDomainMappingEntry(domainInput) {
+        if (typeof domainInput !== "string") {
+            return null;
+        }
+
+        const raw = domainInput.trim();
+        if (!raw) {
+            return null;
+        }
+
+        let parsed;
+
+        try {
+            parsed = new URL(raw.includes("://") ? raw : `http://${raw}`);
+        } catch (error) {
+            throw new Error("Invalid domain");
+        }
+
+        const host = StatusPage.normalizeHostname(parsed.host);
+        if (!host) {
+            throw new Error("Invalid domain");
+        }
+
+        const path = StatusPage.normalizePath(parsed.pathname);
+        return path === "/" ? host : `${host}${path}`;
+    }
+
+    /**
+     * Split a normalized mapping key into host and path.
+     * @param {string} mappingEntry Normalized entry (host or host/path)
+     * @returns {{host: string, path: string} | null} Parsed mapping
+     */
+    static splitMappingEntry(mappingEntry) {
+        const normalized = StatusPage.normalizeDomainMappingEntry(mappingEntry);
+        if (!normalized) {
+            return null;
+        }
+
+        const slashIndex = normalized.indexOf("/");
+        if (slashIndex === -1) {
+            return {
+                host: normalized,
+                path: "/",
+            };
+        }
+
+        return {
+            host: normalized.slice(0, slashIndex),
+            path: normalized.slice(slashIndex),
+        };
+    }
+
+    /**
+     * Find a status page slug from host/path mapping.
+     * @param {string} hostname Request hostname
+     * @param {string} pathname Request path
+     * @returns {string|null} Matched status page slug
+     */
+    static getStatusPageSlugByDomain(hostname, pathname = "/") {
+        const normalizedHost = StatusPage.normalizeHostname(hostname);
+        const normalizedPath = StatusPage.normalizePath(pathname);
+
+        if (!normalizedHost) {
+            return null;
+        }
+
+        let matchedSlug = null;
+        let matchedPathLength = -1;
+
+        for (const [entry, slug] of Object.entries(StatusPage.domainMappingList)) {
+            const parsed = StatusPage.splitMappingEntry(entry);
+            if (!parsed || parsed.host !== normalizedHost) {
+                continue;
+            }
+
+            // Root mapping only matches "/" to avoid shadowing normal app routes.
+            if (parsed.path === "/") {
+                if (normalizedPath === "/" && matchedPathLength < 1) {
+                    matchedSlug = slug;
+                    matchedPathLength = 1;
+                }
+                continue;
+            }
+
+            // Path mapping supports exact path and child paths.
+            if (
+                normalizedPath === parsed.path ||
+                normalizedPath.startsWith(`${parsed.path}/`)
+            ) {
+                if (parsed.path.length > matchedPathLength) {
+                    matchedSlug = slug;
+                    matchedPathLength = parsed.path.length;
+                }
+            }
+        }
+
+        return matchedSlug;
+    }
+
+    /**
      * Handle responses to RSS pages
      * @param {Response} response Response object
      * @param {string} slug Status page slug
@@ -345,11 +502,22 @@ class StatusPage extends BeanModel {
      * @returns {Promise<void>}
      */
     static async loadDomainMappingList() {
-        StatusPage.domainMappingList = await R.getAssoc(`
+        const list = await R.getAll(`
             SELECT domain, slug
             FROM status_page, status_page_cname
             WHERE status_page.id = status_page_cname.status_page_id
         `);
+
+        const result = {};
+
+        for (const row of list) {
+            const normalizedEntry = StatusPage.normalizeDomainMappingEntry(row.domain);
+            if (normalizedEntry) {
+                result[normalizedEntry] = row.slug;
+            }
+        }
+
+        StatusPage.domainMappingList = result;
     }
 
     /**
@@ -391,16 +559,17 @@ class StatusPage extends BeanModel {
                     throw new Error("Invalid domain");
                 }
 
-                if (domain.trim() === "") {
+                const normalizedDomain = StatusPage.normalizeDomainMappingEntry(domain);
+                if (!normalizedDomain) {
                     continue;
                 }
 
                 // If the domain name is used in another status page, delete it
-                await trx.exec("DELETE FROM status_page_cname WHERE domain = ?", [domain]);
+                await trx.exec("DELETE FROM status_page_cname WHERE domain = ?", [normalizedDomain]);
 
                 let mapping = trx.dispense("status_page_cname");
                 mapping.status_page_id = this.id;
-                mapping.domain = domain;
+                mapping.domain = normalizedDomain;
                 await trx.store(mapping);
             }
             await trx.commit();

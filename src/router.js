@@ -186,8 +186,12 @@ const routes = [
         component: StatusPage,
     },
     {
-        path: "/:pathMatch(.*)*",
+        path: "/page-not-found",
         component: NotFound,
+    },
+    {
+        path: "/:pathMatch(.*)*",
+        component: Entry,
     },
 ];
 
