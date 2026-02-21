@@ -143,6 +143,49 @@ async function getRemoteBrowser(remoteBrowserID, userId) {
 }
 
 /**
+ * Clear cached remote browser connection by remote browser ID
+ * @param {number} remoteBrowserID Remote browser ID
+ * @returns {Promise<void>}
+ */
+async function clearRemoteBrowserConnection(remoteBrowserID) {
+    const cachedConnection = remoteBrowserConnections.get(remoteBrowserID);
+    if (!cachedConnection) {
+        return;
+    }
+
+    try {
+        await cachedConnection.browser.close();
+    } catch (_) {}
+
+    remoteBrowserConnections.delete(remoteBrowserID);
+}
+
+/**
+ * Determine if an error is caused by browser/page/context being closed
+ * @param {Error & { message?: string }} error Error
+ * @returns {boolean} True if browser connection is closed
+ */
+function isBrowserClosedError(error) {
+    const message = error?.message || "";
+    return (
+        message.includes("Target page, context or browser has been closed") ||
+        message.includes("Target closed") ||
+        message.includes("Browser has been closed") ||
+        message.includes("Connection closed")
+    );
+}
+
+/**
+ * Determine if an error is a navigation timeout
+ * @param {Error & { name?: string, message?: string }} error Error
+ * @returns {boolean} True if timeout
+ */
+function isNavigationTimeoutError(error) {
+    const message = error?.message || "";
+    return error?.name === "TimeoutError" || message.includes("Timeout") || message.includes("timed out");
+}
+
+/**
  * Prepare the chrome executable path
  * @param {string} executablePath Path to chrome executable
  * @returns {Promise<string>} Executable path
@@ -287,46 +330,101 @@ class RealBrowserMonitorType extends MonitorType {
      * @inheritdoc
      */
     async check(monitor, heartbeat, server) {
-        const browser = monitor.remote_browser
-            ? await getRemoteBrowser(monitor.remote_browser, monitor.user_id)
-            : await getBrowser();
-        const context = await browser.newContext();
-        const page = await context.newPage();
+        const runCheck = async (browser) => {
+            const context = await browser.newContext({
+                ignoreHTTPSErrors: monitor.getIgnoreTls(),
+            });
 
-        // Prevent Local File Inclusion
-        // Accept only http:// and https://
-        // https://github.com/louislam/uptime-kuma/security/advisories/GHSA-2qgm-m29m-cj2h
-        let url = new URL(monitor.url);
-        if (url.protocol !== "http:" && url.protocol !== "https:") {
-            throw new Error("Invalid url protocol, only http and https are allowed.");
+            try {
+                const page = await context.newPage();
+
+                // Prevent Local File Inclusion
+                // Accept only http:// and https://
+                // https://github.com/louislam/uptime-kuma/security/advisories/GHSA-2qgm-m29m-cj2h
+                let url = new URL(monitor.url);
+                if (url.protocol !== "http:" && url.protocol !== "https:") {
+                    throw new Error("Invalid url protocol, only http and https are allowed.");
+                }
+
+                const timeout = Math.max(1000, Math.floor(monitor.interval * 1000 * 0.8));
+                let res;
+
+                try {
+                    res = await page.goto(monitor.url, {
+                        waitUntil: "networkidle",
+                        timeout,
+                    });
+                } catch (error) {
+                    if (!isNavigationTimeoutError(error)) {
+                        throw error;
+                    }
+
+                    // Some sites keep long-lived network connections and never reach "networkidle".
+                    // Retry once with a less strict load condition.
+                    const fallbackTimeout = Math.max(1000, Math.floor(timeout * 0.6));
+                    log.warn(
+                        "monitor",
+                        `[${monitor.name}] page.goto timeout with waitUntil=networkidle, retrying with waitUntil=domcontentloaded`
+                    );
+                    res = await page.goto(monitor.url, {
+                        waitUntil: "domcontentloaded",
+                        timeout: fallbackTimeout,
+                    });
+                }
+
+                if (!res) {
+                    throw new Error("Failed to navigate to page: no response returned by browser.");
+                }
+
+                // Wait for additional time before taking screenshot if configured
+                if (monitor.screenshot_delay > 0) {
+                    await page.waitForTimeout(monitor.screenshot_delay);
+                }
+
+                let filename = jwt.sign(monitor.id, server.jwtSecret) + ".png";
+
+                await page.screenshot({
+                    path: path.join(Database.screenshotDir, filename),
+                });
+
+                if (res.status() >= 200 && res.status() < 400) {
+                    heartbeat.status = UP;
+                    heartbeat.msg = res.status();
+
+                    const timing = res.request().timing();
+                    heartbeat.ping = timing.responseEnd;
+                } else {
+                    throw new Error(res.status() + "");
+                }
+            } finally {
+                try {
+                    await context.close();
+                } catch (_) {}
+            }
+        };
+
+        if (!monitor.remote_browser) {
+            const browser = await getBrowser();
+            await runCheck(browser);
+            return;
         }
 
-        const res = await page.goto(monitor.url, {
-            waitUntil: "networkidle",
-            timeout: monitor.interval * 1000 * 0.8,
-        });
+        try {
+            const browser = await getRemoteBrowser(monitor.remote_browser, monitor.user_id);
+            await runCheck(browser);
+        } catch (error) {
+            if (!isBrowserClosedError(error)) {
+                throw error;
+            }
 
-        // Wait for additional time before taking screenshot if configured
-        if (monitor.screenshot_delay > 0) {
-            await page.waitForTimeout(monitor.screenshot_delay);
-        }
+            log.warn(
+                "chromium",
+                `Remote browser connection dropped for monitor #${monitor.id} (${monitor.name}), reconnecting once`
+            );
+            await clearRemoteBrowserConnection(monitor.remote_browser);
 
-        let filename = jwt.sign(monitor.id, server.jwtSecret) + ".png";
-
-        await page.screenshot({
-            path: path.join(Database.screenshotDir, filename),
-        });
-
-        await context.close();
-
-        if (res.status() >= 200 && res.status() < 400) {
-            heartbeat.status = UP;
-            heartbeat.msg = res.status();
-
-            const timing = res.request().timing();
-            heartbeat.ping = timing.responseEnd;
-        } else {
-            throw new Error(res.status() + "");
+            const browser = await getRemoteBrowser(monitor.remote_browser, monitor.user_id);
+            await runCheck(browser);
         }
     }
 }
