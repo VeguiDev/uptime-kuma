@@ -456,6 +456,7 @@ exports.TYPES_WITH_DOMAIN_EXPIRY_SUPPORT_VIA_FIELD = {
     "real-browser": "url",
     "websocket-upgrade": "url",
     port: "hostname",
+    udp: "hostname",
     ping: "hostname",
     "grpc-keyword": "grpcUrl",
     dns: "hostname",

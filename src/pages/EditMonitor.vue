@@ -41,6 +41,7 @@
                                         </option>
                                         <option value="http">HTTP(s)</option>
                                         <option value="port">TCP Port</option>
+                                        <option value="udp">UDP Port</option>
                                         <option value="ping">Ping</option>
                                         <option value="smtp">SMTP</option>
                                         <option value="snmp">SNMP</option>
@@ -473,10 +474,11 @@
                             </template>
 
                             <!-- Hostname -->
-                            <!-- TCP Port / Ping / DNS / Steam / MQTT / Radius / Tailscale Ping / SNMP / SMTP / SIP Options only -->
+                            <!-- TCP/UDP Port / Ping / DNS / Steam / MQTT / Radius / Tailscale Ping / SNMP / SMTP / SIP Options only -->
                             <div
                                 v-if="
                                     monitor.type === 'port' ||
+                                    monitor.type === 'udp' ||
                                     monitor.type === 'ping' ||
                                     monitor.type === 'dns' ||
                                     monitor.type === 'steam' ||
@@ -685,10 +687,11 @@
                             </template>
 
                             <!-- Port -->
-                            <!-- For TCP Port / Steam / MQTT / Radius Type / SNMP / SIP Options -->
+                            <!-- For TCP/UDP Port / Steam / MQTT / Radius Type / SNMP / SIP Options -->
                             <div
                                 v-if="
                                     monitor.type === 'port' ||
+                                    monitor.type === 'udp' ||
                                     monitor.type === 'steam' ||
                                     monitor.type === 'gamedig' ||
                                     monitor.type === 'mqtt' ||
@@ -3718,6 +3721,7 @@ message HealthCheckResponse {
                     "mqtt",
                     "dns",
                     "port",
+                    "udp",
                     "ping",
                     "steam",
                     "gamedig",
